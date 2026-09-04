@@ -3249,15 +3249,9 @@ async def _handle_resources(
     _out = dict(pretty=pretty, raw=raw, toon=toon, head=head, json_output=json_output)
     if action == "list":
         result = await session.list_resources()
-        data = [
-            {
-                "name": r.name,
-                "uri": str(r.uri),
-                "description": r.description or "",
-                "mimeType": _mcp_attr(r, "mimeType") or "",
-            }
-            for r in result.resources
-        ]
+        # Preserve the complete MCP Resource wire object, including `_meta`
+        # (CSP, permissions, and ui.resourceUri) and any future fields.
+        data = [_mcp_dump(r) for r in result.resources]
         output_result(data, **_out)
     elif action == "templates":
         result = await session.list_resource_templates()
@@ -3273,14 +3267,9 @@ async def _handle_resources(
         output_result(data, **_out)
     elif action == "read":
         result = await session.read_resource(_resource_uri(uri))
-        parts = []
-        for content in result.contents:
-            if hasattr(content, "text"):
-                parts.append(content.text)
-            elif hasattr(content, "blob"):
-                parts.append(content.blob)
-        text = "\n".join(parts) if parts else ""
-        output_result(text, **_out)
+        # Keep the ReadResourceResult envelope and every content block intact;
+        # flattening to text loses mimeType, `_meta`, and binary content.
+        output_result(_mcp_dump(result), **_out)
 
 
 # ---------------------------------------------------------------------------
@@ -3580,14 +3569,7 @@ async def _list_all_tools(session):
 
 async def _dispatch_list_tools(session, params):
     tools = await _list_all_tools(session)
-    return [
-        {
-            "name": t.name,
-            "description": t.description or "",
-            "inputSchema": _mcp_attr(t, "inputSchema") or {},
-        }
-        for t in tools
-    ]
+    return [_mcp_dump(t) for t in tools]
 
 
 async def _dispatch_call_tool(session, params):
@@ -3597,20 +3579,12 @@ async def _dispatch_call_tool(session, params):
 
 async def _dispatch_list_resources(session, params):
     result = await session.list_resources()
-    return [
-        {
-            "name": r.name,
-            "uri": str(r.uri),
-            "description": r.description or "",
-            "mimeType": _mcp_attr(r, "mimeType") or "",
-        }
-        for r in result.resources
-    ]
+    return [_mcp_dump(r) for r in result.resources]
 
 
 async def _dispatch_read_resource(session, params):
     result = await session.read_resource(_resource_uri(params["uri"]))
-    return _extract_content_parts(result.contents, attrs=("text", "blob"))
+    return _mcp_dump(result)
 
 
 async def _dispatch_list_resource_templates(session, params):
