@@ -2594,7 +2594,7 @@ def build_argparse(
         _allocate_param_cli_names(cmd)
         sub.set_defaults(_cmd=cmd)
 
-        if cmd.has_body:
+        if cmd.has_body or cmd.tool_name is not None:
             sub.add_argument(
                 "--stdin",
                 action="store_true",

@@ -23,6 +23,11 @@ SERVER_NAME = "test-server"
 
 TOOLS = [
     {
+        "name": "arbitrary_args",
+        "description": "Return arbitrary JSON arguments",
+        "inputSchema": {"type": "object", "additionalProperties": True},
+    },
+    {
         "name": "echo",
         "description": "Echo back the input",
         "inputSchema": {
@@ -186,7 +191,7 @@ def _call_tool(name: str, arguments: dict) -> dict:
             "structuredContent": {"answer": 42},
             "isError": False,
         }
-    if name == "reserved_args":
+    if name in ("reserved_args", "arbitrary_args"):
         return {
             "content": [_text(json.dumps(arguments, sort_keys=True))],
             "isError": False,

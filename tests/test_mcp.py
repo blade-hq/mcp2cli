@@ -75,6 +75,15 @@ class TestMCPStdio:
         data = json.loads(r.stdout)
         assert data == {"answer": 42}
 
+    @pytest.mark.parametrize("tool,payload,expected", [
+        ("struct-only", {}, {"answer": 42}),
+        ("arbitrary-args", {"nested": {"value": 7}}, {"nested": {"value": 7}}),
+    ])
+    def test_stdin_without_declared_properties(self, tool, payload, expected):
+        r = self._run("--refresh", tool, "--stdin", stdin_data=json.dumps(payload))
+        assert r.returncode == 0, r.stderr
+        assert json.loads(r.stdout) == expected
+
     def test_reserved_boolean_stdin_property_reaches_tool(self):
         r = self._run(
             "--refresh",
