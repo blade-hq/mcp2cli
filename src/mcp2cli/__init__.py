@@ -3210,7 +3210,7 @@ async def _mcp_session(
     if list_mode:
         all_tools = await _list_all_tools(session)
         tools = [
-            _mcp_dump(t)
+            t.model_dump(mode="json", by_alias=True)
             for t in all_tools
         ]
         commands = extract_mcp_commands(tools)
@@ -3614,7 +3614,7 @@ async def _list_all_tools(session):
 
 async def _dispatch_list_tools(session, params):
     tools = await _list_all_tools(session)
-    return [_mcp_dump(t) for t in tools]
+    return [t.model_dump(mode="json", by_alias=True) for t in tools]
 
 
 async def _dispatch_call_tool(session, params):
@@ -4102,7 +4102,7 @@ def _fetch_mcp_tools(
     async def _extract_tools(session):
         all_tools = await _list_all_tools(session)
         tools_result.extend(
-            _mcp_dump(t)
+            t.model_dump(mode="json", by_alias=True)
             for t in all_tools
         )
 
