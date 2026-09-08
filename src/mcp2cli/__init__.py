@@ -112,17 +112,22 @@ def resolve_secret(value: str) -> str:
     """Resolve a secret value from env var, file, or literal.
 
     Supports:
+      literal:VALUE  — return VALUE without interpreting prefixes
+      bearer-env:VAR_NAME — read a token and prepend Bearer
       env:VAR_NAME   — read from environment variable
       file:/path     — read from file (trailing newline stripped)
       literal value  — returned as-is
     """
-    if value.startswith("env:"):
-        var = value[4:]
+    if value.startswith("literal:"):
+        return value[8:]
+    if value.startswith(("env:", "bearer-env:")):
+        bearer = value.startswith("bearer-env:")
+        var = value[11:] if bearer else value[4:]
         resolved = os.environ.get(var)
-        if resolved is None:
+        if resolved is None or (bearer and not resolved):
             print(f"Error: environment variable {var!r} is not set", file=sys.stderr)
             sys.exit(1)
-        return resolved
+        return f"Bearer {resolved}" if bearer else resolved
     if value.startswith("file:"):
         path = Path(value[5:])
         if not path.exists():
@@ -398,8 +403,25 @@ async def _streamable_streams(url: str, headers=None, auth=None):
     from mcp.shared._httpx_utils import create_mcp_http_client
 
     async with create_mcp_http_client(headers=headers, auth=auth) as client:
+        if headers:
+            client.event_hooks["request"].append(_origin_guard(url))
         async with streamable_http_client(url, http_client=client) as streams:
             yield streams[0], streams[1]
+
+
+def _origin_guard(url: str):
+    """Reject redirects before sending configured MCP headers to another origin."""
+    def origin(value):
+        parsed = urlparse(str(value))
+        return parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    expected = origin(url)
+
+    async def check(request):
+        if origin(request.url) != expected:
+            raise ValueError("MCP redirect to a different origin is not allowed")
+
+    return check
 
 
 async def _list_tools_page(session, cursor: str | None):

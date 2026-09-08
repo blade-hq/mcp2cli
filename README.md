@@ -105,6 +105,11 @@ Sensitive values (`--auth-header` values, `--oauth-client-id`, `--oauth-client-s
 `env:` and `file:` prefixes to avoid passing secrets as CLI arguments (which are visible in
 process listings):
 
+The Blade fork also supports `bearer-env:NAME` to build a Bearer header from a
+runtime token, and `literal:VALUE` to preserve values such as `env:example`
+without interpreting them. Streamable HTTP connections with configured headers
+reject redirects to a different origin before sending those headers.
+
 ```bash
 # Read from environment variable
 mcp2cli --mcp https://mcp.example.com/sse \

@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 
+import httpx
 import pytest
 
 import mcp2cli
@@ -34,6 +35,54 @@ class TestResolveSecret:
 
     def test_literal_value(self):
         assert mcp2cli.resolve_secret("my-secret") == "my-secret"
+
+    @pytest.mark.parametrize("value", ["env:UNSET_VARIABLE", "file:/missing", "literal:plain", "${TOKEN}"])
+    def test_explicit_literal_does_not_resolve(self, value):
+        assert mcp2cli.resolve_secret("literal:" + value) == value
+
+    def test_bearer_env(self, monkeypatch, capsys):
+        monkeypatch.setenv("TEST_BEARER_TOKEN", "opaque-token")
+        assert mcp2cli.resolve_secret("bearer-env:TEST_BEARER_TOKEN") == "Bearer opaque-token"
+        monkeypatch.setenv("TEST_BEARER_TOKEN", "")
+        with pytest.raises(SystemExit):
+            mcp2cli.resolve_secret("bearer-env:TEST_BEARER_TOKEN")
+        assert "opaque-token" not in capsys.readouterr().err
+
+    @pytest.mark.asyncio
+    async def test_mcp_headers_never_reach_redirect_origin(self):
+        requests = []
+
+        async def handler(request):
+            requests.append(request)
+            return httpx.Response(307, headers={"location": "https://other.example/mcp"})
+
+        async with httpx.AsyncClient(
+            headers={"X-API-Key": "private-value"}, follow_redirects=True,
+            transport=httpx.MockTransport(handler),
+            event_hooks={"request": [mcp2cli._origin_guard("https://original.example/mcp")]},
+        ) as client:
+            with pytest.raises(ValueError, match="different origin"):
+                await client.post("https://original.example/mcp")
+        assert len(requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_mcp_same_origin_redirect_allowed(self):
+        requests = []
+
+        async def handler(request):
+            requests.append(request)
+            if request.url.path == "/mcp":
+                return httpx.Response(307, headers={"location": "/target"})
+            return httpx.Response(200)
+
+        async with httpx.AsyncClient(
+            headers={"X-API-Key": "private-value"}, follow_redirects=True,
+            transport=httpx.MockTransport(handler),
+            event_hooks={"request": [mcp2cli._origin_guard("https://original.example:443/mcp")]},
+        ) as client:
+            response = await client.post("https://original.example/mcp")
+        assert response.status_code == 200
+        assert len(requests) == 2
 
     def test_env_prefix(self, monkeypatch):
         monkeypatch.setenv("TEST_SECRET_VAR", "from-env")
