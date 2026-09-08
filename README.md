@@ -105,6 +105,11 @@ Sensitive values (`--auth-header` values, `--oauth-client-id`, `--oauth-client-s
 `env:` and `file:` prefixes to avoid passing secrets as CLI arguments (which are visible in
 process listings):
 
+The Blade fork also supports `bearer-env:NAME` to build a Bearer header from a
+runtime token, and `literal:VALUE` to preserve values such as `env:example`
+without interpreting them. Streamable HTTP connections with configured headers
+reject redirects to a different origin before sending those headers.
+
 ```bash
 # Read from environment variable
 mcp2cli --mcp https://mcp.example.com/sse \
@@ -282,6 +287,12 @@ mcp2cli --mcp https://mcp.example.com/sse --json search --query "test"
 mcp2cli --spec ./openapi.json --json list-pets
 mcp2cli --graphql https://api.example.com/graphql --json users
 ```
+
+The Blade fork adds `mcp2cliCall: {toolName, arguments}` to MCP tool-call JSON
+results. This receipt contains the original MCP tool name and parsed input, and
+overrides any same-named server field. Lists and resource reads have no receipt.
+MCP tool lists preserve the standard `_meta` spelling. All MCP tools accept
+`--stdin`, including tools without declared properties.
 
 `--json` takes precedence over `--raw` and `--toon` (both of which can produce
 non-JSON), so it always wins — that is what makes it a reliable "force JSON" switch.

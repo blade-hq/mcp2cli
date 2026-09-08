@@ -75,6 +75,21 @@ class TestMCPStdio:
         data = json.loads(r.stdout)
         assert data == {"answer": 42}
 
+    @pytest.mark.parametrize("tool,payload,expected", [
+        ("struct-only", {}, {"answer": 42}),
+        ("arbitrary-args", {"nested": {"value": 7}}, {"nested": {"value": 7}}),
+    ])
+    def test_stdin_without_declared_properties(self, tool, payload, expected):
+        r = self._run("--refresh", tool, "--stdin", stdin_data=json.dumps(payload))
+        assert r.returncode == 0, r.stderr
+        assert json.loads(r.stdout) == expected
+
+    def test_json_receipt_uses_cli_identity_and_arguments(self):
+        arguments = {"nested": [True, None, {"value": "示例"}]}
+        r = self._run("--refresh", "--json", "arbitrary-args", "--stdin", stdin_data=json.dumps(arguments))
+        assert r.returncode == 0, r.stderr
+        assert json.loads(r.stdout)["mcp2cliCall"] == {"toolName": "arbitrary_args", "arguments": arguments}
+
     def test_reserved_boolean_stdin_property_reaches_tool(self):
         r = self._run(
             "--refresh",
@@ -381,10 +396,12 @@ class TestMCPHTTP:
 class TestSessions:
     """Tests for persistent session support."""
 
-    def test_session_lifecycle(self):
+    def test_session_lifecycle(self, monkeypatch):
         """Start, list, and stop a session."""
         server = f"{sys.executable} {MCP_SERVER}"
         name = "test-lifecycle"
+        marker = "session-secret-must-not-enter-argv"
+        monkeypatch.setenv("MCP_TEST_SESSION_TOKEN", marker)
 
         # Start
         r = subprocess.run(
@@ -398,6 +415,8 @@ class TestSessions:
                 "/tmp/workspace",
                 "--root",
                 "file:///var/project",
+                "--auth-header",
+                "X-API-Key:env:MCP_TEST_SESSION_TOKEN",
                 "--session-start",
                 name,
             ],
@@ -409,6 +428,10 @@ class TestSessions:
         assert name in r.stdout
 
         try:
+            from mcp2cli import session_list
+            pid = next(item["pid"] for item in session_list() if item["name"] == name)
+            command = subprocess.check_output(["ps", "-p", str(pid), "-o", "command="], text=True)
+            assert marker not in command
             # List
             r = subprocess.run(
                 [sys.executable, "-m", "mcp2cli", "--session-list"],

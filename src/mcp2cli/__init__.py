@@ -78,6 +78,7 @@ class CommandDef:
     content_type: str | None = None  # None = json, "multipart/form-data", etc.
     # MCP
     tool_name: str | None = None
+    mcp_tool: dict | None = None
     # GraphQL
     graphql_operation_type: str | None = None  # "query" or "mutation"
     graphql_field_name: str | None = None      # original field name pre-kebab
@@ -112,17 +113,22 @@ def resolve_secret(value: str) -> str:
     """Resolve a secret value from env var, file, or literal.
 
     Supports:
+      literal:VALUE  — return VALUE without interpreting prefixes
+      bearer-env:VAR_NAME — read a token and prepend Bearer
       env:VAR_NAME   — read from environment variable
       file:/path     — read from file (trailing newline stripped)
       literal value  — returned as-is
     """
-    if value.startswith("env:"):
-        var = value[4:]
+    if value.startswith("literal:"):
+        return value[8:]
+    if value.startswith(("env:", "bearer-env:")):
+        bearer = value.startswith("bearer-env:")
+        var = value[11:] if bearer else value[4:]
         resolved = os.environ.get(var)
-        if resolved is None:
+        if resolved is None or (bearer and not resolved):
             print(f"Error: environment variable {var!r} is not set", file=sys.stderr)
             sys.exit(1)
-        return resolved
+        return f"Bearer {resolved}" if bearer else resolved
     if value.startswith("file:"):
         path = Path(value[5:])
         if not path.exists():
@@ -364,6 +370,13 @@ def _mcp_dump(model) -> dict:
     return data
 
 
+def _mcp_call_dump(result, tool_name: str, arguments: dict) -> dict:
+    payload = _mcp_dump(result)
+    # This receipt describes the CLI call, not server-controlled result data.
+    payload["mcp2cliCall"] = {"toolName": tool_name, "arguments": arguments}
+    return payload
+
+
 def _resource_uri(uri: str):
     """Coerce a resource URI to what ``resources/read`` expects.
 
@@ -377,6 +390,15 @@ def _resource_uri(uri: str):
     from pydantic import AnyUrl
 
     return AnyUrl(uri)
+
+
+def _mcp_http_headers(headers):
+    if headers is None:
+        return None
+    try:
+        return {name: value.encode("latin-1") if isinstance(value, str) else value for name, value in headers.items()}
+    except UnicodeEncodeError:
+        raise ValueError("MCP HTTP header value must contain only Latin-1 characters") from None
 
 
 @asynccontextmanager
@@ -397,9 +419,42 @@ async def _streamable_streams(url: str, headers=None, auth=None):
     from mcp.client.streamable_http import streamable_http_client
     from mcp.shared._httpx_utils import create_mcp_http_client
 
-    async with create_mcp_http_client(headers=headers, auth=auth) as client:
+    async with create_mcp_http_client(headers=_mcp_http_headers(headers), auth=auth) as client:
+        if headers:
+            client.event_hooks["request"].append(_origin_guard(url))
         async with streamable_http_client(url, http_client=client) as streams:
             yield streams[0], streams[1]
+
+
+def _origin_guard(url: str):
+    """Reject redirects before sending configured MCP headers to another origin."""
+    def origin(value):
+        parsed = urlparse(str(value))
+        return parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    expected = origin(url)
+
+    async def check(request):
+        if origin(request.url) != expected:
+            raise ValueError("MCP redirect to a different origin is not allowed")
+
+    return check
+
+
+@asynccontextmanager
+async def _sse_streams(url: str, headers=None, auth=None):
+    """Apply the same origin boundary to legacy transport and auto fallback."""
+    from mcp.client.sse import sse_client
+    from mcp.shared._httpx_utils import create_mcp_http_client
+
+    def factory(headers=None, timeout=None, auth=None):
+        client = create_mcp_http_client(headers=_mcp_http_headers(headers), timeout=timeout, auth=auth)
+        if headers:
+            client.event_hooks["request"].append(_origin_guard(url))
+        return client
+
+    async with sse_client(url, headers=headers, auth=auth, httpx_client_factory=factory) as streams:
+        yield streams[0], streams[1]
 
 
 async def _list_tools_page(session, cursor: str | None):
@@ -565,7 +620,8 @@ def _param_to_dict(p: "ParamDef") -> dict:
 
 def command_to_dict(cmd: "CommandDef") -> dict:
     """Serialize a CommandDef to a JSON-friendly dict for `--list --json`."""
-    d: dict = {"name": cmd.name, "description": cmd.description or ""}
+    d: dict = dict(cmd.mcp_tool or {})
+    d.update(name=cmd.name, description=cmd.description or "")
     if cmd.method:
         d["method"] = cmd.method.upper()
     if cmd.path:
@@ -1600,6 +1656,7 @@ def extract_mcp_commands(tools: list[dict]) -> list[CommandDef]:
                 params=params,
                 has_body=bool(params),
                 tool_name=tool.get("name"),
+                mcp_tool=tool,
             )
         )
     return commands
@@ -2553,7 +2610,7 @@ def build_argparse(
         _allocate_param_cli_names(cmd)
         sub.set_defaults(_cmd=cmd)
 
-        if cmd.has_body:
+        if cmd.has_body or cmd.tool_name is not None:
             sub.add_argument(
                 "--stdin",
                 action="store_true",
@@ -2999,9 +3056,7 @@ def run_mcp_http(
                     )
 
         async def _with_sse():
-            from mcp.client.sse import sse_client
-
-            async with sse_client(url, headers=headers, auth=oauth_provider) as (
+            async with _sse_streams(url, headers=headers, auth=oauth_provider) as (
                 read,
                 write,
             ):
@@ -3171,11 +3226,7 @@ async def _mcp_session(
     if list_mode:
         all_tools = await _list_all_tools(session)
         tools = [
-            {
-                "name": t.name,
-                "description": t.description or "",
-                "inputSchema": _mcp_attr(t, "inputSchema") or {},
-            }
+            t.model_dump(mode="json", by_alias=True)
             for t in all_tools
         ]
         commands = extract_mcp_commands(tools)
@@ -3208,7 +3259,7 @@ async def _mcp_session(
         # Emit the full MCP CallToolResult envelope (content, structuredContent,
         # isError) with the camelCase wire names, so the envelope does not
         # change shape with the installed SDK major.
-        output_result(_mcp_dump(result), pretty=pretty, head=head, json_output=True)
+        output_result(_mcp_call_dump(result, tool_name, arguments or {}), pretty=pretty, head=head, json_output=True)
         # A failed tool still exits non-zero under --json so callers can detect
         # it; the envelope on stdout already carries isError for machines.
         return 1 if _mcp_attr(result, "isError") else 0
@@ -3500,13 +3551,23 @@ def session_start(
         [
             sys.executable,
             "-c",
-            f"import mcp2cli; mcp2cli._run_session_daemon({json.dumps(daemon_script)})",
+            "import sys, mcp2cli; mcp2cli._run_session_daemon(sys.stdin.read())",
         ],
         start_new_session=True,
         stdout=subprocess.DEVNULL,
         stderr=open(log_path, "a"),
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.PIPE,
     )
+    # The descriptor may contain resolved credentials. Pass it through a private
+    # pipe, never argv (visible to ps), an environment value, or a disk file.
+    try:
+        proc.stdin.write(daemon_script.encode())
+        proc.stdin.close()
+    except (BrokenPipeError, OSError):
+        proc.kill()
+        proc.wait()
+        print("Error: session daemon could not read configuration", file=sys.stderr)
+        sys.exit(1)
 
     # Wait for socket to appear
     sock_path = _session_sock_path(name)
@@ -3569,12 +3630,13 @@ async def _list_all_tools(session):
 
 async def _dispatch_list_tools(session, params):
     tools = await _list_all_tools(session)
-    return [_mcp_dump(t) for t in tools]
+    return [t.model_dump(mode="json", by_alias=True) for t in tools]
 
 
 async def _dispatch_call_tool(session, params):
-    result = await session.call_tool(params["name"], params.get("arguments", {}))
-    return _mcp_dump(result)
+    arguments = params.get("arguments", {})
+    result = await session.call_tool(params["name"], arguments)
+    return _mcp_call_dump(result, params["name"], arguments)
 
 
 async def _dispatch_list_resources(session, params):
@@ -3789,9 +3851,7 @@ def _run_session_daemon(config_json: str):
                         await _run_with_session(session)
 
             async def _via_sse():
-                from mcp.client.sse import sse_client
-
-                async with sse_client(source, headers=headers) as (read, write):
+                async with _sse_streams(source, headers=headers) as (read, write):
                     async with ClientSession(read, write, list_roots_callback=_roots_callback(roots)) as session:
                         await _run_with_session(session)
 
@@ -4059,11 +4119,7 @@ def _fetch_mcp_tools(
     async def _extract_tools(session):
         all_tools = await _list_all_tools(session)
         tools_result.extend(
-            {
-                "name": t.name,
-                "description": t.description or "",
-                "inputSchema": _mcp_attr(t, "inputSchema") or {},
-            }
+            t.model_dump(mode="json", by_alias=True)
             for t in all_tools
         )
 
@@ -4095,9 +4151,7 @@ def _fetch_mcp_tools(
                         await _extract_tools(session)
 
             async def _via_sse():
-                from mcp.client.sse import sse_client
-
-                async with sse_client(source, headers=headers, auth=oauth_provider) as (
+                async with _sse_streams(source, headers=headers, auth=oauth_provider) as (
                     read,
                     write,
                 ):

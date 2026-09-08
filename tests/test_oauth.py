@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 
+import httpx
 import pytest
 
 import mcp2cli
@@ -34,6 +35,54 @@ class TestResolveSecret:
 
     def test_literal_value(self):
         assert mcp2cli.resolve_secret("my-secret") == "my-secret"
+
+    @pytest.mark.parametrize("value", ["env:UNSET_VARIABLE", "file:/missing", "literal:plain", "${TOKEN}"])
+    def test_explicit_literal_does_not_resolve(self, value):
+        assert mcp2cli.resolve_secret("literal:" + value) == value
+
+    def test_bearer_env(self, monkeypatch, capsys):
+        monkeypatch.setenv("TEST_BEARER_TOKEN", "opaque-token")
+        assert mcp2cli.resolve_secret("bearer-env:TEST_BEARER_TOKEN") == "Bearer opaque-token"
+        monkeypatch.setenv("TEST_BEARER_TOKEN", "")
+        with pytest.raises(SystemExit):
+            mcp2cli.resolve_secret("bearer-env:TEST_BEARER_TOKEN")
+        assert "opaque-token" not in capsys.readouterr().err
+
+    @pytest.mark.asyncio
+    async def test_mcp_headers_never_reach_redirect_origin(self):
+        requests = []
+
+        async def handler(request):
+            requests.append(request)
+            return httpx.Response(307, headers={"location": "https://other.example/mcp"})
+
+        async with httpx.AsyncClient(
+            headers={"X-API-Key": "private-value"}, follow_redirects=True,
+            transport=httpx.MockTransport(handler),
+            event_hooks={"request": [mcp2cli._origin_guard("https://original.example/mcp")]},
+        ) as client:
+            with pytest.raises(ValueError, match="different origin"):
+                await client.post("https://original.example/mcp")
+        assert len(requests) == 1
+
+    @pytest.mark.asyncio
+    async def test_mcp_same_origin_redirect_allowed(self):
+        requests = []
+
+        async def handler(request):
+            requests.append(request)
+            if request.url.path == "/mcp":
+                return httpx.Response(307, headers={"location": "/target"})
+            return httpx.Response(200)
+
+        async with httpx.AsyncClient(
+            headers={"X-API-Key": "private-value"}, follow_redirects=True,
+            transport=httpx.MockTransport(handler),
+            event_hooks={"request": [mcp2cli._origin_guard("https://original.example:443/mcp")]},
+        ) as client:
+            response = await client.post("https://original.example/mcp")
+        assert response.status_code == 200
+        assert len(requests) == 2
 
     def test_env_prefix(self, monkeypatch):
         monkeypatch.setenv("TEST_SECRET_VAR", "from-env")
@@ -301,6 +350,7 @@ class TestRobustOAuthClientProvider:
 
         # Build a synthetic failed refresh response
         class _FakeResponse:
+            next_request = None
             status_code = 400
             async def aread(self):
                 return b'{"error":"invalid_grant"}'
@@ -356,6 +406,7 @@ class TestRobustOAuthClientProvider:
 
         # A 503 from the token endpoint — transient, recoverable on retry.
         class _FakeResponse:
+            next_request = None
             status_code = 503
             async def aread(self):
                 return b"<html>Service Unavailable</html>"
@@ -398,6 +449,7 @@ class TestRobustOAuthClientProvider:
         )
 
         class _FakeResponse:
+            next_request = None
             status_code = 401
             async def aread(self):
                 return b""
@@ -442,6 +494,7 @@ class TestRobustOAuthClientProvider:
 
         # Refresh response that rotates the access token but omits refresh_token
         class _FakeResponse:
+            next_request = None
             status_code = 200
             async def aread(self):
                 return b'{"access_token":"new-access","token_type":"Bearer","expires_in":3600}'
@@ -486,6 +539,7 @@ class TestRobustOAuthClientProvider:
         )
 
         class _FakeResponse:
+            next_request = None
             status_code = 200
             async def aread(self):
                 return (
@@ -1280,3 +1334,49 @@ class TestManualCallbackEndToEnd:
         assert token_forms[0].get("code") == "THE-CODE"
         assert token_forms[0].get("code_verifier"), "PKCE verifier must be sent"
         assert final.headers.get("authorization") == "Bearer TOKEN-OK"
+
+
+@pytest.mark.parametrize("transport", ["auto", "streamable", "sse"])
+def test_mcp_transport_does_not_forward_headers_across_origins(transport):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    requests = []
+    headers_seen = []
+    class Target(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append("target")
+            self.send_response(400)
+            self.end_headers()
+        do_POST = do_GET
+        def log_message(self, *_):
+            pass
+
+    target = ThreadingHTTPServer(("127.0.0.1", 0), Target)
+    class Redirect(Target):
+        def do_GET(self):
+            requests.append("source")
+            headers_seen.append(self.headers.get("X-API-Key"))
+            self.send_response(307)
+            self.send_header("Location", f"http://127.0.0.1:{target.server_port}/mcp")
+            self.end_headers()
+        do_POST = do_GET
+
+    source = ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+    threads = [Thread(target=server.serve_forever, daemon=True) for server in (source, target)]
+    for thread in threads:
+        thread.start()
+    try:
+        with pytest.raises((Exception, SystemExit)):
+            mcp2cli._fetch_mcp_tools(
+                f"http://127.0.0.1:{source.server_port}/mcp", False,
+                [("X-API-Key", "caf\u00e9")], {}, transport=transport,
+            )
+        assert headers_seen and set(headers_seen) == {"caf\u00e9"}
+        assert "source" in requests
+        assert "target" not in requests
+    finally:
+        for server, thread in zip((source, target), threads):
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
