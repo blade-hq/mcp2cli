@@ -352,3 +352,18 @@ class TestEnsureUtf8Output:
         monkeypatch.setattr(sys, "stderr", stream)
         _ensure_utf8_output()
         assert {"errors": "backslashreplace"} in calls
+
+
+def test_mcp_list_preserves_wire_metadata():
+    from mcp2cli import command_to_dict, extract_mcp_commands
+
+    tool = {"name": "show_card", "inputSchema": {"type": "object"},
+            "_meta": {"ui": {"resourceUri": "ui://card"}},
+            "annotations": {"readOnlyHint": True}}
+    result = command_to_dict(extract_mcp_commands([tool])[0])
+    assert result["_meta"] == tool["_meta"]
+    assert result["annotations"] == tool["annotations"]
+    assert result["inputSchema"] == tool["inputSchema"]
+    assert result["name"] == "show-card"
+    assert result["toolName"] == "show_card"
+    assert tool["name"] == "show_card"

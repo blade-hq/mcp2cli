@@ -78,6 +78,7 @@ class CommandDef:
     content_type: str | None = None  # None = json, "multipart/form-data", etc.
     # MCP
     tool_name: str | None = None
+    mcp_tool: dict | None = None
     # GraphQL
     graphql_operation_type: str | None = None  # "query" or "mutation"
     graphql_field_name: str | None = None      # original field name pre-kebab
@@ -565,7 +566,8 @@ def _param_to_dict(p: "ParamDef") -> dict:
 
 def command_to_dict(cmd: "CommandDef") -> dict:
     """Serialize a CommandDef to a JSON-friendly dict for `--list --json`."""
-    d: dict = {"name": cmd.name, "description": cmd.description or ""}
+    d: dict = dict(cmd.mcp_tool or {})
+    d.update(name=cmd.name, description=cmd.description or "")
     if cmd.method:
         d["method"] = cmd.method.upper()
     if cmd.path:
@@ -1600,6 +1602,7 @@ def extract_mcp_commands(tools: list[dict]) -> list[CommandDef]:
                 params=params,
                 has_body=bool(params),
                 tool_name=tool.get("name"),
+                mcp_tool=tool,
             )
         )
     return commands
@@ -3171,11 +3174,7 @@ async def _mcp_session(
     if list_mode:
         all_tools = await _list_all_tools(session)
         tools = [
-            {
-                "name": t.name,
-                "description": t.description or "",
-                "inputSchema": _mcp_attr(t, "inputSchema") or {},
-            }
+            _mcp_dump(t)
             for t in all_tools
         ]
         commands = extract_mcp_commands(tools)
@@ -4059,11 +4058,7 @@ def _fetch_mcp_tools(
     async def _extract_tools(session):
         all_tools = await _list_all_tools(session)
         tools_result.extend(
-            {
-                "name": t.name,
-                "description": t.description or "",
-                "inputSchema": _mcp_attr(t, "inputSchema") or {},
-            }
+            _mcp_dump(t)
             for t in all_tools
         )
 
