@@ -1629,7 +1629,7 @@ def extract_mcp_commands(tools: list[dict]) -> list[CommandDef]:
             used_names.add(name)
 
     for tool, name in zip(tools, cli_names):
-        desc = tool.get("description", "")
+        desc = tool.get("description") or ""
         schema = tool.get("inputSchema", {})
         required_fields = set(schema.get("required", []))
         params: list[ParamDef] = []
@@ -3960,6 +3960,12 @@ def _dispatch_mcp_call(
         )
 
 
+def _check_expected_tool_name(actual: str | None, expected: str | None) -> None:
+    if expected is not None and actual != expected:
+        print("Error: MCP tool alias changed; refresh the tool list before retrying", file=sys.stderr)
+        raise SystemExit(2)
+
+
 def handle_mcp(
     source: str,
     is_stdio: bool,
@@ -3989,6 +3995,7 @@ def handle_mcp(
     top: int | None = None,
     compact: bool = False,
     json_output: bool = False,
+    expect_tool_name: str | None = None,
 ):
     # Build a config dict for cache key generation (future-proof)
     config_for_cache = {
@@ -4085,6 +4092,7 @@ def handle_mcp(
         sys.exit(1)
 
     cmd: CommandDef = args._cmd
+    _check_expected_tool_name(cmd.tool_name, expect_tool_name)
 
     if getattr(args, "stdin", False) is True:
         arguments = read_stdin_json("MCP tool arguments")
@@ -4308,6 +4316,7 @@ def _build_main_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Space-separated tool names only, no descriptions (~2 tokens/tool)",
     )
+    pre.add_argument("--expect-tool-name", help="Require this wire tool name before tools/call")
     pre.add_argument("--pretty", action="store_true", help="Pretty-print JSON output")
     pre.add_argument("--raw", action="store_true", help="Print raw response body")
     pre.add_argument(
@@ -4702,6 +4711,7 @@ def _handle_session_operations(
         sys.exit(1)
 
     cmd: CommandDef = args._cmd
+    _check_expected_tool_name(cmd.tool_name, pre_args.expect_tool_name)
     if getattr(args, "stdin", False) is True:
         arguments = read_stdin_json(f"session {sess_name} tool arguments")
     else:
@@ -4962,6 +4972,7 @@ def _main_impl(argv: list[str], bake_config: BakeConfig | None = None):
             top=pre_args.top,
             compact=pre_args.compact,
             json_output=pre_args.json_output,
+            expect_tool_name=pre_args.expect_tool_name,
         )
         return
 

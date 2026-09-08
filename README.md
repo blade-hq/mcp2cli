@@ -427,3 +427,7 @@ protocol directly and import no SDK, so they hold across majors.
 ## License
 
 [MIT](LICENSE)
+
+Callers storing CLI aliases should pass `--expect-tool-name <wire-name>` before
+the tool subcommand. An inventory change that reassigns the alias fails before
+`tools/call`; refresh discovery and retry with the new alias.
