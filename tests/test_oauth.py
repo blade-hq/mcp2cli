@@ -350,6 +350,7 @@ class TestRobustOAuthClientProvider:
 
         # Build a synthetic failed refresh response
         class _FakeResponse:
+            next_request = None
             status_code = 400
             async def aread(self):
                 return b'{"error":"invalid_grant"}'
@@ -405,6 +406,7 @@ class TestRobustOAuthClientProvider:
 
         # A 503 from the token endpoint — transient, recoverable on retry.
         class _FakeResponse:
+            next_request = None
             status_code = 503
             async def aread(self):
                 return b"<html>Service Unavailable</html>"
@@ -447,6 +449,7 @@ class TestRobustOAuthClientProvider:
         )
 
         class _FakeResponse:
+            next_request = None
             status_code = 401
             async def aread(self):
                 return b""
@@ -491,6 +494,7 @@ class TestRobustOAuthClientProvider:
 
         # Refresh response that rotates the access token but omits refresh_token
         class _FakeResponse:
+            next_request = None
             status_code = 200
             async def aread(self):
                 return b'{"access_token":"new-access","token_type":"Bearer","expires_in":3600}'
@@ -535,6 +539,7 @@ class TestRobustOAuthClientProvider:
         )
 
         class _FakeResponse:
+            next_request = None
             status_code = 200
             async def aread(self):
                 return (
