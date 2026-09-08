@@ -84,6 +84,12 @@ class TestMCPStdio:
         assert r.returncode == 0, r.stderr
         assert json.loads(r.stdout) == expected
 
+    def test_json_receipt_uses_cli_identity_and_arguments(self):
+        arguments = {"nested": [True, None, {"value": "示例"}]}
+        r = self._run("--refresh", "--json", "arbitrary-args", "--stdin", stdin_data=json.dumps(arguments))
+        assert r.returncode == 0, r.stderr
+        assert json.loads(r.stdout)["mcp2cliCall"] == {"toolName": "arbitrary_args", "arguments": arguments}
+
     def test_reserved_boolean_stdin_property_reaches_tool(self):
         r = self._run(
             "--refresh",

@@ -370,6 +370,13 @@ def _mcp_dump(model) -> dict:
     return data
 
 
+def _mcp_call_dump(result, tool_name: str, arguments: dict) -> dict:
+    payload = _mcp_dump(result)
+    # This receipt describes the CLI call, not server-controlled result data.
+    payload["mcp2cliCall"] = {"toolName": tool_name, "arguments": arguments}
+    return payload
+
+
 def _resource_uri(uri: str):
     """Coerce a resource URI to what ``resources/read`` expects.
 
@@ -383,6 +390,15 @@ def _resource_uri(uri: str):
     from pydantic import AnyUrl
 
     return AnyUrl(uri)
+
+
+def _mcp_http_headers(headers):
+    if headers is None:
+        return None
+    try:
+        return {name: value.encode("latin-1") if isinstance(value, str) else value for name, value in headers.items()}
+    except UnicodeEncodeError:
+        raise ValueError("MCP HTTP header value must contain only Latin-1 characters") from None
 
 
 @asynccontextmanager
@@ -403,7 +419,7 @@ async def _streamable_streams(url: str, headers=None, auth=None):
     from mcp.client.streamable_http import streamable_http_client
     from mcp.shared._httpx_utils import create_mcp_http_client
 
-    async with create_mcp_http_client(headers=headers, auth=auth) as client:
+    async with create_mcp_http_client(headers=_mcp_http_headers(headers), auth=auth) as client:
         if headers:
             client.event_hooks["request"].append(_origin_guard(url))
         async with streamable_http_client(url, http_client=client) as streams:
@@ -432,7 +448,7 @@ async def _sse_streams(url: str, headers=None, auth=None):
     from mcp.shared._httpx_utils import create_mcp_http_client
 
     def factory(headers=None, timeout=None, auth=None):
-        client = create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
+        client = create_mcp_http_client(headers=_mcp_http_headers(headers), timeout=timeout, auth=auth)
         if headers:
             client.event_hooks["request"].append(_origin_guard(url))
         return client
@@ -3243,7 +3259,7 @@ async def _mcp_session(
         # Emit the full MCP CallToolResult envelope (content, structuredContent,
         # isError) with the camelCase wire names, so the envelope does not
         # change shape with the installed SDK major.
-        output_result(_mcp_dump(result), pretty=pretty, head=head, json_output=True)
+        output_result(_mcp_call_dump(result, tool_name, arguments or {}), pretty=pretty, head=head, json_output=True)
         # A failed tool still exits non-zero under --json so callers can detect
         # it; the envelope on stdout already carries isError for machines.
         return 1 if _mcp_attr(result, "isError") else 0
@@ -3618,8 +3634,9 @@ async def _dispatch_list_tools(session, params):
 
 
 async def _dispatch_call_tool(session, params):
-    result = await session.call_tool(params["name"], params.get("arguments", {}))
-    return _mcp_dump(result)
+    arguments = params.get("arguments", {})
+    result = await session.call_tool(params["name"], arguments)
+    return _mcp_call_dump(result, params["name"], arguments)
 
 
 async def _dispatch_list_resources(session, params):

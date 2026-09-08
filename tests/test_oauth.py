@@ -1342,6 +1342,7 @@ def test_mcp_transport_does_not_forward_headers_across_origins(transport):
     from threading import Thread
 
     requests = []
+    headers_seen = []
     class Target(BaseHTTPRequestHandler):
         def do_GET(self):
             requests.append("target")
@@ -1355,6 +1356,7 @@ def test_mcp_transport_does_not_forward_headers_across_origins(transport):
     class Redirect(Target):
         def do_GET(self):
             requests.append("source")
+            headers_seen.append(self.headers.get("X-API-Key"))
             self.send_response(307)
             self.send_header("Location", f"http://127.0.0.1:{target.server_port}/mcp")
             self.end_headers()
@@ -1368,8 +1370,9 @@ def test_mcp_transport_does_not_forward_headers_across_origins(transport):
         with pytest.raises((Exception, SystemExit)):
             mcp2cli._fetch_mcp_tools(
                 f"http://127.0.0.1:{source.server_port}/mcp", False,
-                [("X-API-Key", "fixture-secret")], {}, transport=transport,
+                [("X-API-Key", "caf\u00e9")], {}, transport=transport,
             )
+        assert headers_seen and set(headers_seen) == {"caf\u00e9"}
         assert "source" in requests
         assert "target" not in requests
     finally:
