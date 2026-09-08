@@ -424,6 +424,22 @@ def _origin_guard(url: str):
     return check
 
 
+@asynccontextmanager
+async def _sse_streams(url: str, headers=None, auth=None):
+    """Apply the same origin boundary to legacy transport and auto fallback."""
+    from mcp.client.sse import sse_client
+    from mcp.shared._httpx_utils import create_mcp_http_client
+
+    def factory(headers=None, timeout=None, auth=None):
+        client = create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
+        if headers:
+            client.event_hooks["request"].append(_origin_guard(url))
+        return client
+
+    async with sse_client(url, headers=headers, auth=auth, httpx_client_factory=factory) as streams:
+        yield streams[0], streams[1]
+
+
 async def _list_tools_page(session, cursor: str | None):
     """Request one page of ``tools/list``.
 
@@ -3021,9 +3037,7 @@ def run_mcp_http(
                     )
 
         async def _with_sse():
-            from mcp.client.sse import sse_client
-
-            async with sse_client(url, headers=headers, auth=oauth_provider) as (
+            async with _sse_streams(url, headers=headers, auth=oauth_provider) as (
                 read,
                 write,
             ):
@@ -3522,13 +3536,23 @@ def session_start(
         [
             sys.executable,
             "-c",
-            f"import mcp2cli; mcp2cli._run_session_daemon({json.dumps(daemon_script)})",
+            "import sys, mcp2cli; mcp2cli._run_session_daemon(sys.stdin.read())",
         ],
         start_new_session=True,
         stdout=subprocess.DEVNULL,
         stderr=open(log_path, "a"),
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.PIPE,
     )
+    # The descriptor may contain resolved credentials. Pass it through a private
+    # pipe, never argv (visible to ps), an environment value, or a disk file.
+    try:
+        proc.stdin.write(daemon_script.encode())
+        proc.stdin.close()
+    except (BrokenPipeError, OSError):
+        proc.kill()
+        proc.wait()
+        print("Error: session daemon could not read configuration", file=sys.stderr)
+        sys.exit(1)
 
     # Wait for socket to appear
     sock_path = _session_sock_path(name)
@@ -3811,9 +3835,7 @@ def _run_session_daemon(config_json: str):
                         await _run_with_session(session)
 
             async def _via_sse():
-                from mcp.client.sse import sse_client
-
-                async with sse_client(source, headers=headers) as (read, write):
+                async with _sse_streams(source, headers=headers) as (read, write):
                     async with ClientSession(read, write, list_roots_callback=_roots_callback(roots)) as session:
                         await _run_with_session(session)
 
@@ -4117,9 +4139,7 @@ def _fetch_mcp_tools(
                         await _extract_tools(session)
 
             async def _via_sse():
-                from mcp.client.sse import sse_client
-
-                async with sse_client(source, headers=headers, auth=oauth_provider) as (
+                async with _sse_streams(source, headers=headers, auth=oauth_provider) as (
                     read,
                     write,
                 ):
