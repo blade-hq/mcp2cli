@@ -1329,3 +1329,46 @@ class TestManualCallbackEndToEnd:
         assert token_forms[0].get("code") == "THE-CODE"
         assert token_forms[0].get("code_verifier"), "PKCE verifier must be sent"
         assert final.headers.get("authorization") == "Bearer TOKEN-OK"
+
+
+@pytest.mark.parametrize("transport", ["auto", "streamable", "sse"])
+def test_mcp_transport_does_not_forward_headers_across_origins(transport):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    requests = []
+    class Target(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append("target")
+            self.send_response(400)
+            self.end_headers()
+        do_POST = do_GET
+        def log_message(self, *_):
+            pass
+
+    target = ThreadingHTTPServer(("127.0.0.1", 0), Target)
+    class Redirect(Target):
+        def do_GET(self):
+            requests.append("source")
+            self.send_response(307)
+            self.send_header("Location", f"http://127.0.0.1:{target.server_port}/mcp")
+            self.end_headers()
+        do_POST = do_GET
+
+    source = ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+    threads = [Thread(target=server.serve_forever, daemon=True) for server in (source, target)]
+    for thread in threads:
+        thread.start()
+    try:
+        with pytest.raises((Exception, SystemExit)):
+            mcp2cli._fetch_mcp_tools(
+                f"http://127.0.0.1:{source.server_port}/mcp", False,
+                [("X-API-Key", "fixture-secret")], {}, transport=transport,
+            )
+        assert "source" in requests
+        assert "target" not in requests
+    finally:
+        for server, thread in zip((source, target), threads):
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)

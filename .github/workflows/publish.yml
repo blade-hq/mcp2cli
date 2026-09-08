@@ -41,4 +41,3 @@ jobs:
         run: .venv/bin/python -c "import importlib.metadata as m; print('mcp', m.version('mcp'))"
 
       - run: .venv/bin/python -m pytest -q
-

@@ -381,10 +381,12 @@ class TestMCPHTTP:
 class TestSessions:
     """Tests for persistent session support."""
 
-    def test_session_lifecycle(self):
+    def test_session_lifecycle(self, monkeypatch):
         """Start, list, and stop a session."""
         server = f"{sys.executable} {MCP_SERVER}"
         name = "test-lifecycle"
+        marker = "session-secret-must-not-enter-argv"
+        monkeypatch.setenv("MCP_TEST_SESSION_TOKEN", marker)
 
         # Start
         r = subprocess.run(
@@ -398,6 +400,8 @@ class TestSessions:
                 "/tmp/workspace",
                 "--root",
                 "file:///var/project",
+                "--auth-header",
+                "X-API-Key:env:MCP_TEST_SESSION_TOKEN",
                 "--session-start",
                 name,
             ],
@@ -409,6 +413,10 @@ class TestSessions:
         assert name in r.stdout
 
         try:
+            from mcp2cli import session_list
+            pid = next(item["pid"] for item in session_list() if item["name"] == name)
+            command = subprocess.check_output(["ps", "-p", str(pid), "-o", "command="], text=True)
+            assert marker not in command
             # List
             r = subprocess.run(
                 [sys.executable, "-m", "mcp2cli", "--session-list"],
